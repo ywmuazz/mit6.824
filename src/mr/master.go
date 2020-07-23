@@ -1,15 +1,18 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
-
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+)
 
 type Master struct {
 	// Your definitions here.
-
+	filenames []string
+	nReduce   int
+	done      bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -19,11 +22,11 @@ type Master struct {
 //
 // the RPC argument and reply types are defined in rpc.go.
 //
-func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (m *Master) GetMapFilename(req *MapFilenameReq, resp *MapFilenameResp) error {
+	//说实话要不要检测失败的任务，重新发出去
+	resp.Filename = req.Test
 	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -46,10 +49,8 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
-	ret := false
-
+	ret := m.done
 	// Your code here.
-
 
 	return ret
 }
@@ -60,11 +61,16 @@ func (m *Master) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeMaster(files []string, nReduce int) *Master {
-	m := Master{}
+	m := Master{files, nReduce, false}
 
 	// Your code here.
 
-
 	m.server()
 	return &m
+}
+
+func (m *Master) WorkerDone(req *WorkerDoneReq, resp *WorkerDoneResp) error {
+	m.done = true
+	resp.Success = true
+	return nil
 }
