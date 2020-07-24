@@ -1,10 +1,13 @@
 package mr
 
 import (
+	"errors"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
 )
 
 //
@@ -29,14 +32,57 @@ func ihash(key string) int {
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	resp, err := callGetMapFilename()
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println("filename: ", resp.Filename)
+
+	kvlist, err := handleMap(resp.Filename, mapf)
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(len(kvlist))
+
+	respw, err := callWorkerDone()
+	if err != nil {
+		fmt.Println("return code: ", respw.Success)
+	}
+}
+
+func callGetMapFilename() (*MapFilenameResp, error) {
 	req := MapFilenameReq{"A"}
 	resp := MapFilenameResp{}
-	call("Master.GetMapFilename", &req, &resp)
-	fmt.Println("filename: ", resp.Filename)
-	reqw := WorkerDoneReq{}
-	respw := WorkerDoneResp{}
-	call("Master.WorkerDone", &reqw, &respw)
-	fmt.Println("return code: ", respw.Success)
+	succ := call("Master.GetMapFilename", &req, &resp)
+	if succ {
+		return &resp, nil
+	}
+	return nil, errors.New("call func failed")
+	// fmt.Println("filename: ", resp.Filename)
+}
+func callWorkerDone() (*WorkerDoneResp, error) {
+	req := WorkerDoneReq{}
+	resp := WorkerDoneResp{}
+	succ := call("Master.WorkerDone", &req, &resp)
+	if succ {
+		return &resp, nil
+	}
+	return nil, errors.New("call func failed")
+}
+
+func handleMap(filename string, mapf func(string, string) []KeyValue) ([]KeyValue, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+	kv := mapf(filename, string(content))
+	return kv, nil
 }
 
 //
