@@ -11,6 +11,36 @@ import (
 	"strconv"
 )
 
+const (
+	NotStart = iota
+	InMap
+	MapDone
+	InReduce
+	ReduceDone
+)
+
+//getWorkerTask的返回状态
+const (
+	GetMapTaskSuccess    = "getMapTaskSuccess"
+	NoMapTask            = "NoMapTask"
+	GetReduceTaskSuccess = "GetReduceTaskSuccess"
+	NoReduceTask         = "NoReduceTask"
+	AllDone              = "AllDone"
+)
+
+//WorkerDone的提交状态
+const (
+	MapTaskDone    = "MapTaskDone"
+	MapTaskFail    = "MapTaskFail"
+	ReduceTaskDone = "ReduceTaskDone"
+	ReduceTaskFail = "ReduceTaskFail"
+)
+
+const (
+	MapTask    = "MapTask"
+	ReduceTask = "ReduceTask"
+)
+
 //
 // example to show how to declare the arguments
 // and reply for an RPC.
