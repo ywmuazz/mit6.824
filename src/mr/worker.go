@@ -70,14 +70,16 @@ func (m *Work) work() {
 			if err != nil {
 				fmt.Println(err)
 			}
-			fmt.Printf("MapTask postData:\n%v\nend.", JsonString(postData))
-			os.Exit(0)
+			fmt.Printf("MapTask postData:\n%v\nend.\n", JsonString(postData))
 
 			resp, err := rpcCall("Master.WorkResult", postData)
 			if err != nil {
 				fmt.Println(err, resp)
 			}
+
 		} else if success == GetReduceTaskSuccess {
+			fmt.Printf("get reduce task succ. get json:\n%v\n", JsonString(resp))
+
 			postData, err := m.handleReduce(resp)
 			if err != nil {
 				fmt.Println(err)
@@ -113,6 +115,7 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 	fileNo := mp.GetInt("inputFileNo")
 	nReduce := mp.GetInt("nReduce")
 	log.Println("map filename: ", filename)
+
 	file, err := os.Open(filename)
 	if err != nil {
 		log.Fatalf("cannot open %v", filename)
@@ -123,20 +126,97 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 		log.Fatalf("cannot read %v", filename)
 	}
 	file.Close()
+
 	kvlist := m.mapf(filename, string(content))
 	fmt.Printf("mapf call done. len(kv): %d\n", len(kvlist))
-	outputFileList, err := outputKVlist(kvlist, filename, fileNo, nReduce)
+
+	//分区排序写入文件
+	outputFileList, err := m.outputMapKVlist(kvlist, filename, fileNo, nReduce)
 	if err != nil {
 		log.Println(err)
 	}
-	//分区排序写入文件
-	return MapData{"success": MapTaskDone, "inputFile": filename, "outputFile": outputFileList}, nil
+
+	return MapData{
+		"success":     MapTaskDone,
+		"inputFile":   filename,
+		"inputFileNo": fileNo,
+		"outputFile":  outputFileList,
+	}, nil
+}
+
+func makeStringSlice(kvs []KeyValue) []string {
+	ret := []string{}
+	for _, kv := range kvs {
+		ret = append(ret, kv.Value)
+	}
+	return ret
 }
 
 func (m *Work) handleReduce(mp MapData) (MapData, error) {
-	filename := mp.GetString("inputFile")
-	fmt.Println("reduce filename: ", filename)
-	return MapData{"success": ReduceTaskDone, "inputFile": filename, "outputFile": filename + "done"}, nil
+	//{"inputFile":0,"nMap":1,"success":"GetReduceTaskSuccess"}
+	taskNo := mp.GetInt("inputFile")
+	nMap := mp.GetInt("nMap")
+	//组合出有序kvlist
+	kvList := m.inputReduceKVlist(taskNo, nMap)
+	outputList := []KeyValue{}
+	idx := 0
+	for i, kv := range kvList {
+		if kv.Key != kvList[idx].Key {
+			value := m.reducef(kvList[idx].Key, makeStringSlice(kvList[idx:i]))
+			outputList = append(outputList, KeyValue{kvList[idx].Key, value})
+			idx = i
+		}
+		if i == len(kvList)-1 {
+			value := m.reducef(kvList[idx].Key, makeStringSlice(kvList[idx:i+1]))
+			outputList = append(outputList, KeyValue{kvList[idx].Key, value})
+		}
+	}
+	outputFile, err := m.outputReduceKVlist(outputList, taskNo)
+	if err != nil {
+		log.Fatalf("cannot output kvlist to file. filename:%v ,err %v.\n", outputFile, err)
+	}
+	return MapData{
+		"success":    ReduceTaskDone,
+		"inputFile":  taskNo,
+		"outputFile": outputFile,
+	}, nil
+}
+
+func (m *Work) outputReduceKVlist(kvs []KeyValue, reduceNo int) (string, error) {
+	filename := fmt.Sprintf("mr-out-%d", reduceNo)
+	f, err := os.Create(filename)
+	if err != nil {
+		log.Fatalf("cannot open file %v . err: %v\n", filename, err)
+	}
+	defer f.Close()
+	for _, kv := range kvs {
+		_, err := fmt.Fprintf(f, "%v %v\n", kv.Key, kv.Value)
+		if err != nil {
+			log.Fatalf("cannot write to file %v . err: %v\n", filename, err)
+		}
+	}
+	return filename, nil
+}
+
+func (m *Work) inputReduceKVlist(taskNo, nMap int) []KeyValue {
+	ret := []KeyValue{}
+	for i := 0; i < nMap; i++ {
+		filename := fmt.Sprintf("mr-%d-%d", i, taskNo)
+		f, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open file %v.err: %v\n", filename, err)
+		}
+		tmp := []KeyValue{}
+		dec := json.NewDecoder(f)
+		if err := dec.Decode(&tmp); err != nil {
+			log.Fatalf("cannot read file %v.err: %v\n", filename, err)
+		}
+		ret = append(ret, tmp...)
+		f.Close()
+	}
+	sort.Sort(ByKey(ret))
+	return ret
+
 }
 
 func calBucket(key string, m int) int {
@@ -144,7 +224,7 @@ func calBucket(key string, m int) int {
 }
 
 //分区排序写文件
-func outputKVlist(kvlist []KeyValue, filename string, fileNo int, nReduce int) ([]string, error) {
+func (m *Work) outputMapKVlist(kvlist []KeyValue, filename string, fileNo int, nReduce int) ([]string, error) {
 	kvs := make([]([]KeyValue), nReduce)
 	filepaths := []string{}
 	for _, kv := range kvlist {
@@ -196,40 +276,4 @@ func rpcCall(f string, req MapData) (MapData, error) {
 	}
 	s := fmt.Sprintf("call func %v failed.", f)
 	return resp, errors.New(s)
-}
-
-func (m MapData) GetString(key string) string {
-	value, exist := m[key]
-	if !exist {
-		return ""
-	}
-	str, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return str
-}
-
-func (m MapData) GetMapData(key string) MapData {
-	value, exist := m[key]
-	if !exist {
-		return make(map[string]interface{}, 0)
-	}
-	str, ok := value.(map[string]interface{})
-	if !ok {
-		return make(map[string]interface{}, 0)
-	}
-	return str
-}
-
-func (m MapData) GetInt(key string) int {
-	value, exist := m[key]
-	if !exist {
-		return 0
-	}
-	ret, ok := value.(int)
-	if !ok {
-		return 0
-	}
-	return ret
 }
