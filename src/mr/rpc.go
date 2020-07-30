@@ -11,12 +11,20 @@ import (
 	"strconv"
 )
 
+//仅master使用的状态，不涉及网络传输 所以用int
 const (
 	NotStart = iota
 	InMap
 	MapDone
 	InReduce
 	ReduceDone
+)
+
+//file
+const (
+	Idle = iota
+	Using
+	Done
 )
 
 //getWorkerTask的返回状态
@@ -36,6 +44,7 @@ const (
 	ReduceTaskFail = "ReduceTaskFail"
 )
 
+//返回给worker的任务类型标识
 const (
 	MapTask    = "MapTask"
 	ReduceTask = "ReduceTask"
