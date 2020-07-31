@@ -42,14 +42,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func JsonString(x interface{}) string {
-	b, err := json.Marshal(x)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
 func (m *Work) work() {
 
 	for {

@@ -1,5 +1,7 @@
 package mr
 
+import "encoding/json"
+
 type Element interface{}
 type MapData map[string]interface{}
 
@@ -72,4 +74,12 @@ func (m MapData) GetStringSlice(key string) []string {
 		return []string{}
 	}
 	return ret
+}
+
+func JsonString(x interface{}) string {
+	b, err := json.Marshal(x)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }

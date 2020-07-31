@@ -101,15 +101,14 @@ func MakeMaster(files []string, nReduce int) *Master {
 	return &m
 }
 
-func (m *Master) getNumMapFiles() int    { return len(m.mapFiles) }
-func (m *Master) getNumReduceFiles() int { return len(m.reduceTasks) }
-
 func (m *Master) getNumAllMapTask() int  { return len(m.filenames) }
+func (m *Master) getNumMapFiles() int    { return len(m.mapFiles) }
 func (m *Master) getNumInMapTask() int   { return len(m.inMapFiles) }
 func (m *Master) getNumDoneMapTask() int { return len(m.doneMapFiles) }
 func (m *Master) isMapAllDone() bool     { return m.getNumDoneMapTask() == m.getNumAllMapTask() }
 
 func (m *Master) getNumAllReduceTask() int  { return m.nReduce }
+func (m *Master) getNumReduceFiles() int    { return len(m.reduceTasks) }
 func (m *Master) getNumInReduceTask() int   { return len(m.inReduceTasks) }
 func (m *Master) getNumDoneReduceTask() int { return len(m.doneReduceTasks) }
 func (m *Master) isReduceAllDone() bool     { return m.getNumDoneReduceTask() == m.getNumAllReduceTask() }
