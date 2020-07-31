@@ -63,12 +63,6 @@ type MapFilenameResp struct {
 	Filename string
 }
 
-type WorkerDoneReq struct {
-}
-type WorkerDoneResp struct {
-	Success bool
-}
-
 // Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name

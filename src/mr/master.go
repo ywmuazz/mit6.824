@@ -92,7 +92,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		m.mapFileToNo[f] = i
 	}
 	for i := 0; i < nReduce; i++ {
-		m.reduceTasks = append(m.reduceTasks, i)
+		m.pushReduceTask(i)
 	}
 
 	// Your code here.
@@ -109,7 +109,7 @@ func (m *Master) getNumInMapTask() int   { return len(m.inMapFiles) }
 func (m *Master) getNumDoneMapTask() int { return len(m.doneMapFiles) }
 func (m *Master) isMapAllDone() bool     { return m.getNumDoneMapTask() == m.getNumAllMapTask() }
 
-func (m *Master) getNumAllReduceTask() int  { return m.getNumAllMapTask() }
+func (m *Master) getNumAllReduceTask() int  { return m.nReduce }
 func (m *Master) getNumInReduceTask() int   { return len(m.inReduceTasks) }
 func (m *Master) getNumDoneReduceTask() int { return len(m.doneReduceTasks) }
 func (m *Master) isReduceAllDone() bool     { return m.getNumDoneReduceTask() == m.getNumAllReduceTask() }
@@ -148,6 +148,25 @@ func (m *Master) pushDoneMapFile(f string) {
 	m.mSplitsState[f] = Done
 }
 
+func (m *Master) eraseInReduceTaskByNo(taskNo int) error {
+	idx := -1
+	for i, _ := range m.inReduceTasks {
+		if taskNo == m.inReduceTasks[i] {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return errors.New(fmt.Sprintf("cannot find reduceTask %v in inReduceTasks.", taskNo))
+	}
+	m.inReduceTasks = append(m.inReduceTasks[:idx], m.inReduceTasks[idx+1:]...)
+	return nil
+}
+func (m *Master) pushDoneReduceTask(taskNo int) {
+	m.doneReduceTasks = append(m.doneReduceTasks, taskNo)
+	m.mReduceTaskState[taskNo] = Done
+}
+
 func (m *Master) mapTaskComplete(f string) error {
 	if err := m.eraseInMapFileByName(f); err != nil {
 		return err
@@ -156,30 +175,50 @@ func (m *Master) mapTaskComplete(f string) error {
 	return nil
 }
 
+func (m *Master) reduceTaskComplete(taskNo int) error {
+	if err := m.eraseInReduceTaskByNo(taskNo); err != nil {
+		return err
+	}
+	m.pushDoneReduceTask(taskNo)
+	return nil
+}
+
 func (m *Master) WorkResult(req *MapData, resp *MapData) error {
 	state := m.getState()
 	succ := req.GetString("success")
-	inputFile := req.GetString("inputFile")
 	outputFile := req.GetStringSlice("outputFile")
 	fmt.Println("master get workResult: ", succ)
 	if succ == MapTaskDone {
-		mapfile := inputFile
+		mapfile := req.GetString("inputFile")
 		// mapNo := req.GetInt("inputFileNo")
-		fmt.Printf("inputfile: %v outputfile: %v\n", inputFile, outputFile)
+		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
 		if err := m.mapTaskComplete(mapfile); err != nil {
 			log.Println(err)
 		}
 	} else if succ == MapTaskFail {
 		//TODO
 	} else if succ == ReduceTaskDone {
-		fmt.Printf("inputfile: %v outputfile: %v\n", inputFile, outputFile)
-		m.done = true
+		taskNo := req.GetInt("inputFile")
+		outputFile := req.GetString("outputFile")
+		fmt.Printf("inputfile: %v outputfile: %v\n", taskNo, outputFile)
+		if err := m.reduceTaskComplete(taskNo); err != nil {
+			log.Println(err)
+		}
+		if m.getState() == ReduceDone {
+			log.Printf("all reduce tasks done. master exit.\n")
+			os.Exit(0)
+		}
 	} else if succ == ReduceTaskFail {
 		//TODO
 	} else {
-		fmt.Println("not accepted success state.", state, inputFile, outputFile)
+		fmt.Println("not accepted success code.", state, (*req)["inputFile"])
 	}
 	return nil
+}
+
+func (m *Master) pushReduceTask(taskNo int) {
+	m.reduceTasks = append(m.reduceTasks, taskNo)
+	m.mReduceTaskState[taskNo] = Idle
 }
 
 func (m *Master) pushMapFile(f string) {
@@ -269,12 +308,6 @@ func (m *Master) getReduceTaskResp() MapData {
 		ret["success"] = NoReduceTask
 	}
 	return ret
-}
-
-func (m *Master) WorkerDone(req *WorkerDoneReq, resp *WorkerDoneResp) error {
-	m.done = true
-	resp.Success = true
-	return nil
 }
 
 var (

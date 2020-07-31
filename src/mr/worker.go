@@ -56,6 +56,7 @@ func (m *Work) work() {
 		resp, err := rpcCall("Master.GetWorkerTask", MapData{})
 		if err != nil {
 			fmt.Println(err)
+			fmt.Println("worker exit.")
 			return
 		}
 		success := resp.GetString("success")
