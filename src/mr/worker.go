@@ -47,8 +47,7 @@ func (m *Work) work() {
 	for {
 		resp, err := rpcCall("Master.GetWorkerTask", MapData{})
 		if err != nil {
-			fmt.Println(err)
-			fmt.Println("worker exit.")
+			fmt.Println(err, "worker exit.")
 			return
 		}
 		success := resp.GetString("success")
@@ -111,12 +110,14 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot open %v", filename)
+		log.Printf("cannot open %v", filename)
+		return MapData{"success": MapTaskFail, "inputFile": filename, "inputFileNo": fileNo}, nil
 	}
 
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", filename)
+		log.Printf("cannot read %v", filename)
+		return MapData{"success": MapTaskFail, "inputFile": filename, "inputFileNo": fileNo}, nil
 	}
 	file.Close()
 
@@ -127,6 +128,7 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 	outputFileList, err := m.outputMapKVlist(kvlist, filename, fileNo, nReduce)
 	if err != nil {
 		log.Println(err)
+		return MapData{"success": MapTaskFail, "inputFile": filename, "inputFileNo": fileNo}, nil
 	}
 
 	return MapData{
@@ -135,6 +137,7 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 		"inputFileNo": fileNo,
 		"outputFile":  outputFileList,
 	}, nil
+
 }
 
 func makeStringSlice(kvs []KeyValue) []string {
@@ -150,7 +153,12 @@ func (m *Work) handleReduce(mp MapData) (MapData, error) {
 	taskNo := mp.GetInt("inputFile")
 	nMap := mp.GetInt("nMap")
 	//组合出有序kvlist
-	kvList := m.inputReduceKVlist(taskNo, nMap)
+	kvList, err := m.inputReduceKVlist(taskNo, nMap)
+	if err != nil {
+		log.Println(err)
+		return MapData{"success": ReduceTaskDone, "inputFile": taskNo}, nil
+	}
+
 	outputList := []KeyValue{}
 	idx := 0
 	for i, kv := range kvList {
@@ -166,7 +174,8 @@ func (m *Work) handleReduce(mp MapData) (MapData, error) {
 	}
 	outputFile, err := m.outputReduceKVlist(outputList, taskNo)
 	if err != nil {
-		log.Fatalf("cannot output kvlist to file. filename:%v ,err %v.\n", outputFile, err)
+		log.Printf("cannot output kvlist to file. filename:%v ,err %v.\n", outputFile, err)
+		return MapData{"success": ReduceTaskDone, "inputFile": taskNo}, nil
 	}
 	return MapData{
 		"success":    ReduceTaskDone,
@@ -179,36 +188,40 @@ func (m *Work) outputReduceKVlist(kvs []KeyValue, reduceNo int) (string, error) 
 	filename := fmt.Sprintf("mr-out-%d", reduceNo)
 	f, err := os.Create(filename)
 	if err != nil {
-		log.Fatalf("cannot open file %v . err: %v\n", filename, err)
+		log.Printf("cannot open file %v . err: %v\n", filename, err)
+		return "", err
 	}
 	defer f.Close()
 	for _, kv := range kvs {
 		_, err := fmt.Fprintf(f, "%v %v\n", kv.Key, kv.Value)
 		if err != nil {
-			log.Fatalf("cannot write to file %v . err: %v\n", filename, err)
+			log.Printf("cannot write to file %v . err: %v\n", filename, err)
+			return "", err
 		}
 	}
 	return filename, nil
 }
 
-func (m *Work) inputReduceKVlist(taskNo, nMap int) []KeyValue {
+func (m *Work) inputReduceKVlist(taskNo, nMap int) ([]KeyValue, error) {
 	ret := []KeyValue{}
 	for i := 0; i < nMap; i++ {
 		filename := fmt.Sprintf("mr-%d-%d", i, taskNo)
 		f, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open file %v.err: %v\n", filename, err)
+			log.Printf("cannot open file %v.err: %v\n", filename, err)
+			return []KeyValue{}, err
 		}
 		tmp := []KeyValue{}
 		dec := json.NewDecoder(f)
 		if err := dec.Decode(&tmp); err != nil {
-			log.Fatalf("cannot read file %v.err: %v\n", filename, err)
+			log.Printf("cannot read file %v.err: %v\n", filename, err)
+			return []KeyValue{}, err
 		}
 		ret = append(ret, tmp...)
 		f.Close()
 	}
 	sort.Sort(ByKey(ret))
-	return ret
+	return ret, nil
 
 }
 
@@ -248,7 +261,8 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	sockname := masterSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Println("dialing:", err)
+		return false
 	}
 	defer c.Close()
 
@@ -257,7 +271,7 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 		return true
 	}
 
-	fmt.Println(err)
+	fmt.Println("call error: ", err)
 	return false
 }
 

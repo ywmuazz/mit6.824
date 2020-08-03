@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sync"
+	"time"
 )
 
 type MasterState int
@@ -35,6 +37,17 @@ type Master struct {
 
 	start bool
 	done  bool
+
+	chanForExit chan struct{}
+
+	sync.Mutex
+}
+
+func (m *Master) Exit() {
+	<-m.chanForExit
+	fmt.Println("master process exit.")
+	time.Sleep(time.Duration(500) * time.Millisecond)
+	os.Exit(0)
 }
 
 //
@@ -50,6 +63,7 @@ func (m *Master) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+	go m.Exit()
 	go http.Serve(l, nil)
 }
 
@@ -71,7 +85,8 @@ func (m *Master) Done() bool {
 //
 func MakeMaster(files []string, nReduce int) *Master {
 	//最好对files去重/检验是否存在
-	m := Master{filenames: files,
+	m := Master{
+		filenames:        files,
 		nReduce:          nReduce,
 		nMap:             len(files),
 		mapFiles:         []string{},
@@ -86,6 +101,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		reduceTaskToNo:   map[string]int{},
 		start:            false,
 		done:             false,
+		chanForExit:      make(chan struct{}),
 	}
 	for i, f := range files {
 		m.pushMapFile(f)
@@ -124,6 +140,79 @@ func (m *Master) getState() MasterState {
 		return ReduceDone
 	}
 
+}
+
+func (m *Master) WorkResult(req *MapData, resp *MapData) error {
+	m.Lock()
+	defer m.Unlock()
+
+	state := m.getState()
+	succ := req.GetString("success")
+	outputFile := req.GetStringSlice("outputFile")
+	fmt.Println("master get workResult: ", succ)
+	if succ == MapTaskDone {
+		mapfile := req.GetString("inputFile")
+		// mapNo := req.GetInt("inputFileNo")
+		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
+		if err := m.mapTaskComplete(mapfile); err != nil {
+			log.Println(err)
+		}
+	} else if succ == MapTaskFail {
+		mapfile := req.GetString("inputFile")
+		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
+		if err := m.mapTaskFail(mapfile); err != nil {
+			log.Println(err)
+		}
+	} else if succ == ReduceTaskDone {
+		taskNo := req.GetInt("inputFile")
+		outputFile := req.GetString("outputFile")
+		fmt.Printf("inputfile: %v outputfile: %v\n", taskNo, outputFile)
+		if err := m.reduceTaskComplete(taskNo); err != nil {
+			log.Println(err)
+		}
+		if m.getState() == ReduceDone {
+			log.Printf("all reduce tasks done. master will exit soon.\n")
+			close(m.chanForExit)
+		}
+	} else if succ == ReduceTaskFail {
+		taskNo := req.GetInt("inputFile")
+		fmt.Println("reduce task fail, taskNo: ", taskNo)
+		if err := m.reduceTaskFail(taskNo); err != nil {
+			log.Println(err)
+		}
+		//TODO
+	} else {
+		fmt.Println("not accepted success code.", state, (*req)["inputFile"])
+	}
+	return nil
+}
+
+func (m *Master) GetWorkerTask(req *MapData, resp *MapData) error {
+	m.Lock()
+	defer m.Unlock()
+	mp := MapData{}
+	state := m.getState()
+	if state == NotStart {
+		m.start = true
+		state = m.getState()
+	}
+	if state == InMap {
+		//加锁？计时？
+		//如果没有map任务则在get里面处理出无map任务的返回值
+		mp = m.getMapTaskResp()
+
+	} else if state == InReduce {
+
+		mp = m.getReduceTaskResp()
+		log.Printf("Master reach inReduce. mpjson:%v\n", JsonString(mp))
+	} else {
+		mp["success"] = AllDone
+	}
+
+	*resp = mp
+	log.Println("getWorkerTask resp: ", *resp)
+
+	return nil
 }
 
 //删除一个inMapfile
@@ -173,6 +262,13 @@ func (m *Master) mapTaskComplete(f string) error {
 	m.pushDoneMapFile(f)
 	return nil
 }
+func (m *Master) mapTaskFail(f string) error {
+	if err := m.eraseInMapFileByName(f); err != nil {
+		return err
+	}
+	m.pushMapFile(f)
+	return nil
+}
 
 func (m *Master) reduceTaskComplete(taskNo int) error {
 	if err := m.eraseInReduceTaskByNo(taskNo); err != nil {
@@ -182,36 +278,11 @@ func (m *Master) reduceTaskComplete(taskNo int) error {
 	return nil
 }
 
-func (m *Master) WorkResult(req *MapData, resp *MapData) error {
-	state := m.getState()
-	succ := req.GetString("success")
-	outputFile := req.GetStringSlice("outputFile")
-	fmt.Println("master get workResult: ", succ)
-	if succ == MapTaskDone {
-		mapfile := req.GetString("inputFile")
-		// mapNo := req.GetInt("inputFileNo")
-		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
-		if err := m.mapTaskComplete(mapfile); err != nil {
-			log.Println(err)
-		}
-	} else if succ == MapTaskFail {
-		//TODO
-	} else if succ == ReduceTaskDone {
-		taskNo := req.GetInt("inputFile")
-		outputFile := req.GetString("outputFile")
-		fmt.Printf("inputfile: %v outputfile: %v\n", taskNo, outputFile)
-		if err := m.reduceTaskComplete(taskNo); err != nil {
-			log.Println(err)
-		}
-		if m.getState() == ReduceDone {
-			log.Printf("all reduce tasks done. master exit.\n")
-			os.Exit(0)
-		}
-	} else if succ == ReduceTaskFail {
-		//TODO
-	} else {
-		fmt.Println("not accepted success code.", state, (*req)["inputFile"])
+func (m *Master) reduceTaskFail(taskNo int) error {
+	if err := m.eraseInReduceTaskByNo(taskNo); err != nil {
+		return err
 	}
+	m.pushReduceTask(taskNo)
 	return nil
 }
 
@@ -307,50 +378,4 @@ func (m *Master) getReduceTaskResp() MapData {
 		ret["success"] = NoReduceTask
 	}
 	return ret
-}
-
-var (
-	first = false
-)
-
-// GetMapTaskSuccess    = "getMapTaskSuccess"
-// NoMapTask            = "NoMapTask"
-// GetReduceTaskSuccess = "GetReduceTaskSuccess"
-// NoReduceTask         = "NoReduceTask"
-// AllDone              = "AllDone"
-//完成getTask的逻辑
-func (m *Master) GetWorkerTask(req *MapData, resp *MapData) error {
-	mp := MapData{}
-	state := m.getState()
-	if state == NotStart {
-		m.start = true
-		state = m.getState()
-	}
-	if state == InMap {
-		//加锁？计时？
-		//如果没有map任务则在get里面处理出无map任务的返回值
-		mp = m.getMapTaskResp()
-
-	} else if state == InReduce {
-
-		//TODO
-		mp = m.getReduceTaskResp()
-		log.Printf("Master reach inReduce. mpjson:%v\n", JsonString(mp))
-	} else {
-		mp["success"] = AllDone
-	}
-	*resp = mp
-	log.Println("getWorkerTask resp: ", *resp)
-
-	return nil
-}
-
-//~~~~~~~~~~~
-//-----------
-//###########
-
-func (m *Master) GetMapFilename(req *MapFilenameReq, resp *MapFilenameResp) error {
-	//说实话要不要检测失败的任务，重新发出去
-	resp.Filename = req.Test
-	return nil
 }
