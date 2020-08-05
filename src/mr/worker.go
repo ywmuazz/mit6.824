@@ -106,6 +106,7 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 	filename := mp.GetString("inputFile")
 	fileNo := mp.GetInt("inputFileNo")
 	nReduce := mp.GetInt("nReduce")
+	taskID := mp.GetInt("taskID")
 	log.Println("map filename: ", filename)
 
 	file, err := os.Open(filename)
@@ -136,6 +137,7 @@ func (m *Work) handleMap(mp MapData) (MapData, error) {
 		"inputFile":   filename,
 		"inputFileNo": fileNo,
 		"outputFile":  outputFileList,
+		"taskID":      taskID,
 	}, nil
 
 }
@@ -152,6 +154,7 @@ func (m *Work) handleReduce(mp MapData) (MapData, error) {
 	//{"inputFile":0,"nMap":1,"success":"GetReduceTaskSuccess"}
 	taskNo := mp.GetInt("inputFile")
 	nMap := mp.GetInt("nMap")
+	taskID := mp.GetInt("taskID")
 	//组合出有序kvlist
 	kvList, err := m.inputReduceKVlist(taskNo, nMap)
 	if err != nil {
@@ -181,6 +184,7 @@ func (m *Work) handleReduce(mp MapData) (MapData, error) {
 		"success":    ReduceTaskDone,
 		"inputFile":  taskNo,
 		"outputFile": outputFile,
+		"taskID":     taskID,
 	}, nil
 }
 

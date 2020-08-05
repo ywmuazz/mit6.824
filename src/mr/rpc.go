@@ -11,6 +11,8 @@ import (
 	"strconv"
 )
 
+const expiredTime = 10
+
 //仅master使用的状态，不涉及网络传输 所以用int
 const (
 	NotStart = iota
@@ -25,6 +27,18 @@ const (
 	Idle = iota
 	Using
 	Done
+)
+
+//任务类型 int
+const (
+	MapType = iota
+	ReduceType
+)
+
+const (
+	Waiting = iota
+	Success
+	Fail
 )
 
 //getWorkerTask的返回状态

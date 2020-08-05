@@ -14,8 +14,21 @@ import (
 
 type MasterState int
 type SplitStat int
+type TaskType int
+type TaskState int
 
 //未防止中途任务失败，所以没有任务不代表所有任务已完成，需要轮询继续等待alldone
+
+//若定时fail和result同时到达，若fail抢锁成功，则认为taskfail，而若result先抢到锁，则fail检测到状态已改变之后就停止
+type TaskRec struct {
+	taskID   int
+	taskType TaskType
+	mapFile  string
+	taskNo   int
+	state    TaskState
+	timer    *time.Timer
+	resCome  chan struct{}
+}
 
 type Master struct {
 	// Your definitions here.
@@ -34,6 +47,8 @@ type Master struct {
 	mReduceTaskState map[int]SplitStat
 	mapFileToNo      map[string]int
 	reduceTaskToNo   map[string]int
+
+	taskRecs []*TaskRec
 
 	start bool
 	done  bool
@@ -102,6 +117,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		start:            false,
 		done:             false,
 		chanForExit:      make(chan struct{}),
+		taskRecs:         []*TaskRec{},
 	}
 	for i, f := range files {
 		m.pushMapFile(f)
@@ -149,25 +165,27 @@ func (m *Master) WorkResult(req *MapData, resp *MapData) error {
 	state := m.getState()
 	succ := req.GetString("success")
 	outputFile := req.GetStringSlice("outputFile")
+	taskID := req.GetInt("taskID")
 	fmt.Println("master get workResult: ", succ)
+	//先把定时器关了
+	m.taskRecs[taskID].resCome <- struct{}{}
 	if succ == MapTaskDone {
 		mapfile := req.GetString("inputFile")
-		// mapNo := req.GetInt("inputFileNo")
 		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
-		if err := m.mapTaskComplete(mapfile); err != nil {
+		if err := m.mapTaskComplete(taskID, mapfile); err != nil {
 			log.Println(err)
 		}
 	} else if succ == MapTaskFail {
 		mapfile := req.GetString("inputFile")
 		fmt.Printf("inputfile: %v outputfile: %v\n", mapfile, outputFile)
-		if err := m.mapTaskFail(mapfile); err != nil {
+		if err := m.mapTaskFail(taskID, mapfile); err != nil {
 			log.Println(err)
 		}
 	} else if succ == ReduceTaskDone {
 		taskNo := req.GetInt("inputFile")
 		outputFile := req.GetString("outputFile")
 		fmt.Printf("inputfile: %v outputfile: %v\n", taskNo, outputFile)
-		if err := m.reduceTaskComplete(taskNo); err != nil {
+		if err := m.reduceTaskComplete(taskID, taskNo); err != nil {
 			log.Println(err)
 		}
 		if m.getState() == ReduceDone {
@@ -177,10 +195,9 @@ func (m *Master) WorkResult(req *MapData, resp *MapData) error {
 	} else if succ == ReduceTaskFail {
 		taskNo := req.GetInt("inputFile")
 		fmt.Println("reduce task fail, taskNo: ", taskNo)
-		if err := m.reduceTaskFail(taskNo); err != nil {
+		if err := m.reduceTaskFail(taskID, taskNo); err != nil {
 			log.Println(err)
 		}
-		//TODO
 	} else {
 		fmt.Println("not accepted success code.", state, (*req)["inputFile"])
 	}
@@ -255,34 +272,50 @@ func (m *Master) pushDoneReduceTask(taskNo int) {
 	m.mReduceTaskState[taskNo] = Done
 }
 
-func (m *Master) mapTaskComplete(f string) error {
+func (m *Master) mapTaskComplete(taskID int, f string) error {
+	if m.taskRecs[taskID].state != Waiting {
+		return errors.New("state change. cannot sol mapTaskComplete.")
+	}
 	if err := m.eraseInMapFileByName(f); err != nil {
 		return err
 	}
 	m.pushDoneMapFile(f)
+	m.taskRecs[taskID].state = Success
 	return nil
 }
-func (m *Master) mapTaskFail(f string) error {
+func (m *Master) mapTaskFail(taskID int, f string) error {
+	if m.taskRecs[taskID].state != Waiting {
+		return errors.New("state change. cannot sol mapTaskFail.")
+	}
 	if err := m.eraseInMapFileByName(f); err != nil {
 		return err
 	}
 	m.pushMapFile(f)
+	m.taskRecs[taskID].state = Fail
 	return nil
 }
 
-func (m *Master) reduceTaskComplete(taskNo int) error {
+func (m *Master) reduceTaskComplete(taskID, taskNo int) error {
+	if m.taskRecs[taskID].state != Waiting {
+		return errors.New("state change. cannot sol reduceTaskComplete.")
+	}
 	if err := m.eraseInReduceTaskByNo(taskNo); err != nil {
 		return err
 	}
 	m.pushDoneReduceTask(taskNo)
+	m.taskRecs[taskID].state = Success
 	return nil
 }
 
-func (m *Master) reduceTaskFail(taskNo int) error {
+func (m *Master) reduceTaskFail(taskID, taskNo int) error {
+	if m.taskRecs[taskID].state != Waiting {
+		return errors.New("state change. cannot sol reduceTaskFail.")
+	}
 	if err := m.eraseInReduceTaskByNo(taskNo); err != nil {
 		return err
 	}
 	m.pushReduceTask(taskNo)
+	m.taskRecs[taskID].state = Fail
 	return nil
 }
 
@@ -322,6 +355,85 @@ func (m *Master) pushInReduceTask(no int) {
 	m.mReduceTaskState[no] = Using
 }
 
+func (m *Master) mapTaskExpired(taskID int, f string) {
+	m.Lock()
+	defer m.Unlock()
+	if err := m.mapTaskFail(taskID, f); err != nil {
+		//不影响继续运行的err
+		log.Println(err)
+	}
+}
+func (m *Master) reduceTaskExpired(taskID, taskNo int) {
+	m.Lock()
+	defer m.Unlock()
+	if err := m.reduceTaskFail(taskID, taskNo); err != nil {
+		//不影响继续运行的err
+		log.Println(err)
+	}
+}
+
+func (m *Master) getNumTaskRec() int {
+	return len(m.taskRecs)
+}
+
+func (m *Master) addMapTaskRec(f string) int {
+	t := &TaskRec{
+		taskID:   m.getNumTaskRec(),
+		taskType: MapType,
+		mapFile:  f,
+		taskNo:   -1,
+		state:    Waiting,
+		timer:    time.NewTimer(time.Duration(expiredTime) * time.Second),
+		resCome:  make(chan struct{}, 1),
+	}
+	m.taskRecs = append(m.taskRecs, t)
+	go func(id int) {
+		select {
+		case <-m.taskRecs[id].timer.C:
+			m.mapTaskExpired(id, f)
+			break
+		case <-m.taskRecs[id].resCome:
+			if m.taskRecs[id].timer.Stop() {
+				log.Printf("Stop timer success. taskID:%v.\n", t.taskID)
+			} else {
+				log.Printf("Stop timer fail. taskID:%v.\n", t.taskID)
+			}
+			break
+		}
+
+	}(t.taskID)
+	return t.taskID
+}
+
+func (m *Master) addReduceTaskRec(no int) int {
+	t := &TaskRec{
+		taskID:   m.getNumTaskRec(),
+		taskType: ReduceType,
+		mapFile:  "",
+		taskNo:   no,
+		state:    Waiting,
+		timer:    time.NewTimer(time.Duration(expiredTime) * time.Second),
+		resCome:  make(chan struct{}, 1),
+	}
+	m.taskRecs = append(m.taskRecs, t)
+	go func(id int) {
+		select {
+		case <-m.taskRecs[id].timer.C:
+			m.reduceTaskExpired(id, no)
+			break
+		case <-m.taskRecs[id].resCome:
+			if m.taskRecs[id].timer.Stop() {
+				log.Printf("Stop timer success. taskID:%v.\n", t.taskID)
+			} else {
+				log.Printf("Stop timer fail. taskID:%v.\n", t.taskID)
+			}
+			break
+		}
+
+	}(t.taskID)
+	return t.taskID
+}
+
 //TODO
 func (m *Master) getReduceTask() (MapData, bool) {
 	ret := MapData{"nMap": m.nMap}
@@ -336,11 +448,14 @@ func (m *Master) getReduceTask() (MapData, bool) {
 	ret["inputFile"] = reduceTask
 
 	m.pushInReduceTask(reduceTask)
+
+	taskID := m.addReduceTaskRec(reduceTask)
+	ret["taskID"] = taskID
+
 	return ret, true
 }
 
 func (m *Master) getMapTask() (MapData, bool) {
-	//加锁
 	ret := MapData{}
 	if m.isMapAllDone() {
 		return MapData{}, false
@@ -358,6 +473,10 @@ func (m *Master) getMapTask() (MapData, bool) {
 	ret["inputFileNo"] = no
 	ret["nReduce"] = m.nReduce
 	m.pushInMapFile(mapFile)
+
+	taskID := m.addMapTaskRec(mapFile)
+	ret["taskID"] = taskID
+
 	return ret, true
 }
 
